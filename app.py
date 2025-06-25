@@ -85,7 +85,7 @@ def load_model_from_hf(name, info):
             except ImportError:
                 st.error("TensorFlow not available for Keras models.")
                 return None
-            # Define CustomInputLayer to handle batch_shape kw
+            # Handle custom InputLayer batch_shape
             from tensorflow.keras.layers import InputLayer as TFInputLayer
             @tf.keras.utils.register_keras_serializable()
             class CustomInputLayer(TFInputLayer):
@@ -93,9 +93,14 @@ def load_model_from_hf(name, info):
                     if batch_shape is not None:
                         kwargs['batch_input_shape'] = tuple(batch_shape)
                     super().__init__(*args, **kwargs)
-            # Register in global custom objects
-            tf.keras.utils.get_custom_objects()['InputLayer'] = CustomInputLayer
-            custom_objects = {'InputLayer': CustomInputLayer}
+            # Handle custom dtype policy
+            from tensorflow.keras.mixed_precision import Policy as KerasPolicy
+            @tf.keras.utils.register_keras_serializable()
+            class DTypePolicy(KerasPolicy):
+                def __init__(self, name):
+                    super().__init__(name)
+            # Register custom objects
+            custom_objects = {'InputLayer': CustomInputLayer, 'DTypePolicy': DTypePolicy}
             lname = name.lower()
             # Add preprocess_input if needed
             if "resnet50" in lname:
@@ -107,7 +112,7 @@ def load_model_from_hf(name, info):
             elif "mobilenetv2" in lname:
                 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
                 custom_objects["preprocess_input"] = preprocess_input
-            # Additional architectures can be added similarly
+            # Load model
             try:
                 model = tf.keras.models.load_model(path, custom_objects=custom_objects, compile=False)
                 return model
@@ -218,9 +223,9 @@ def detect_yolo(model, pil_img: Image.Image):
     return detections
 
 class GenderDetectionProcessor(VideoProcessorBase):
-    def __init__(self):
+    def __init__(self, model, info):
         self.model = model
-        self.info = MODELS_INFO[model_name]
+        self.info = info
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="rgb24")
@@ -289,7 +294,7 @@ if model is not None:
         key="live-gender-detect",
         mode=WebRtcMode.SENDRECV,
         media_stream_constraints={"video": True, "audio": False},
-        video_processor_factory=GenderDetectionProcessor,
+        video_processor_factory=lambda: GenderDetectionProcessor(model, MODELS_INFO[model_name]),
         async_processing=True,
     )
 else:
