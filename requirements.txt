@@ -6,3 +6,6 @@ numpy
 huggingface-hub
 streamlit-webrtc
 av
+ultralytics==8.3.156
+torch==2.0.1
+torchvision==0.15.2

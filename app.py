@@ -12,54 +12,75 @@ st.write("Select a model and upload an image or use live camera.")
 
 HF_REPO_ID = "RishiPTrial/models_h5"
 
-@st.cache_data
+# Check if ultralytics is available
+def check_ultralytics():
+    try:
+        import ultralytics
+        version = ultralytics.__version__ if hasattr(ultralytics, "__version__") else "unknown"
+        st.info(f"Ultralytics installed, version: {version}")
+        return True
+    except Exception as e:
+        st.warning(f"Ultralytics import failed: {e}")
+        return False
+
+_ULTRA_AVAILABLE = check_ultralytics()
+
+@st.cache_data(show_spinner=False)
 def list_models():
     api = HfApi()
-    return [
-        f for f in api.list_repo_files(HF_REPO_ID)
-        if f.lower().endswith((".h5", ".pt", ".pth"))
-    ]
+    try:
+        files = api.list_repo_files(repo_id=HF_REPO_ID)
+        return [f for f in files if f.lower().endswith((".h5", ".pt", ".pth")) and not f.startswith(".")]
+    except Exception:
+        return []
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def build_model_info():
     info = {}
     for f in list_models():
-        name = f.lower()
-        if name.endswith(".pt"):
+        name_lower = f.lower()
+        if name_lower.endswith(".pt"):
             info[f] = {"type": "detection", "framework": "yolo"}
         elif f == "model_final.pth":
             info[f] = {"type": "classification", "framework": "torch_custom", "input_size": 224}
-        elif name.endswith(".pth"):
+        elif name_lower.endswith(".pth"):
             info[f] = {"type": "classification", "framework": "torch", "input_size": 224}
-        elif name.endswith(".h5"):
-            size = 299 if "inceptionv3" in name else 224
+        elif name_lower.endswith(".h5"):
+            size = 299 if "inceptionv3" in name_lower else 224
             info[f] = {"type": "classification", "framework": "keras", "input_size": size}
     return info
 
 MODELS_INFO = build_model_info()
+if not MODELS_INFO:
+    st.error(f"No model files found in HF repo {HF_REPO_ID}")
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def load_model(name, info):
-    path = hf_hub_download(HF_REPO_ID, filename=name)
-    fw = info["framework"]
+    # Download
+    try:
+        path = hf_hub_download(repo_id=HF_REPO_ID, filename=name)
+    except Exception as e:
+        st.error(f"Error downloading {name}: {e}")
+        return None
 
+    fw = info["framework"]
+    # Keras classification
     if fw == "keras":
         try:
             import keras
             from keras.utils import custom_object_scope
-
             custom_objects = {}
             lname = name.lower()
+            # Add preprocess_input if known architecture
             if "resnet" in lname:
                 from keras.applications.resnet50 import preprocess_input
                 custom_objects["preprocess_input"] = preprocess_input
-            elif "inceptionv3" in lname:
+            if "inceptionv3" in lname:
                 from keras.applications.inception_v3 import preprocess_input
                 custom_objects["preprocess_input"] = preprocess_input
-            elif "mobilenetv2" in lname:
+            if "mobilenetv2" in lname:
                 from keras.applications.mobilenet_v2 import preprocess_input
                 custom_objects["preprocess_input"] = preprocess_input
-
             with custom_object_scope(custom_objects):
                 model = keras.models.load_model(path, compile=False)
             return model
@@ -67,134 +88,171 @@ def load_model(name, info):
             st.error(f"Failed loading Keras model {name}: {e}")
             return None
 
+    # PyTorch custom ResNet18
     if fw == "torch_custom":
-        import torch
-        import torch.nn as nn
-        from torchvision import models
-        model = models.resnet18(pretrained=False)
-        model.fc = nn.Linear(model.fc.in_features, 1)
-        state_dict = torch.load(path, map_location="cpu")
-        model.load_state_dict(state_dict.get("model", state_dict), strict=False)
-        model.eval()
-        return model
+        try:
+            import torch
+            import torch.nn as nn
+            from torchvision import models
+            model = models.resnet18(pretrained=False)
+            model.fc = nn.Linear(model.fc.in_features, 1)
+            state = torch.load(path, map_location="cpu")
+            sd = state.get("model", state) if isinstance(state, dict) else state
+            model.load_state_dict(sd, strict=False)
+            model.eval()
+            return model
+        except Exception as e:
+            st.error(f"Failed loading custom Torch model {name}: {e}")
+            return None
 
+    # Generic PyTorch .pth
     if fw == "torch":
-        import torch
-        model = torch.load(path, map_location="cpu")
-        model.eval()
-        return model
+        try:
+            import torch
+            model = torch.load(path, map_location="cpu")
+            model.eval()
+            return model
+        except Exception as e:
+            st.error(f"Failed loading Torch model {name}: {e}")
+            return None
 
+    # YOLO .pt
     if fw == "yolo":
-        from ultralytics import YOLO
-        return YOLO(path)
+        if not _ULTRA_AVAILABLE:
+            st.error("Ultralytics YOLO not installed; please add `ultralytics` to requirements.")
+            return None
+        try:
+            from ultralytics import YOLO
+            return YOLO(path)
+        except Exception as e:
+            st.error(f"Failed loading YOLO model {name}: {e}")
+            return None
 
+    st.error(f"Unsupported framework for {name}")
     return None
 
-def preprocess_image(img, size):
+def preprocess_image(img: Image.Image, size: int):
     return np.asarray(img.resize((size, size))).astype(np.float32) / 255.0
 
-def classify(model, img):
-    arr = np.expand_dims(img, axis=0)
+def classify(model, arr: np.ndarray):
+    x = np.expand_dims(arr, axis=0)
+    # Keras
     try:
         import keras
         if isinstance(model, keras.Model):
-            return model.predict(arr)
+            return model.predict(x)
     except Exception:
         pass
+    # Torch
     try:
         import torch
         if isinstance(model, torch.nn.Module):
-            x = torch.tensor(arr).permute(0,3,1,2).float()
+            t = torch.tensor(x).permute(0,3,1,2).float()
             with torch.no_grad():
-                return model(x).cpu().numpy()
+                out = model(t)
+            return out.cpu().numpy()
     except Exception:
         pass
     return None
 
 def interpret_class(preds):
-    if preds is None: return None, None
-    arr = np.array(preds)
+    if preds is None:
+        return None, None
+    arr = np.asarray(preds)
+    # binary logits or 2-class
     if arr.ndim == 2 and arr.shape[1] == 2:
-        exps = np.exp(arr - np.max(arr))
-        probs = exps / np.sum(exps)
-        idx = np.argmax(probs)
-        return ["Male", "Female"][idx], float(probs[idx])
+        exps = np.exp(arr - np.max(arr, axis=1, keepdims=True))
+        probs = exps / np.sum(exps, axis=1, keepdims=True)
+        idx = int(np.argmax(probs, axis=1)[0])
+        return ["Male", "Female"][idx], float(probs[0][idx])
     if arr.ndim == 2 and arr.shape[1] == 1:
         val = float(arr[0][0])
-        prob = 1/(1 + np.exp(-val))
+        prob = 1/(1+np.exp(-val))
         label = "Female" if prob >= 0.5 else "Male"
-        return label, prob if label == "Female" else 1 - prob
+        return label, prob if label=="Female" else 1-prob
     return None, None
 
-def detect(model, img):
+def detect(model, img: Image.Image):
     arr = np.array(img.convert("RGB"))
     results = model.predict(source=arr)
     dets = []
     for r in results:
         for b in r.boxes:
-            name = model.names[int(b.cls[0])]
-            coords = list(map(int, b.xyxy[0].cpu().numpy()))
-            dets.append((name, float(b.conf[0]), coords))
+            cls = int(b.cls[0])
+            conf = float(b.conf[0])
+            # coords: xyxy
+            try:
+                coords = tuple(map(int, b.xyxy[0].cpu().numpy()))
+            except Exception:
+                coords = tuple(map(int, b.xyxy[0]))
+            name = model.names.get(cls, str(cls)) if hasattr(model, "names") else str(cls)
+            dets.append((name, conf, coords))
     return dets
 
 class GenderProcessor(VideoProcessorBase):
     def __init__(self):
         self.model = model
         self.info = MODELS_INFO[model_name]
-    def recv(self, frame):
-        img = Image.fromarray(frame.to_ndarray(format="rgb24"))
-        draw = ImageDraw.Draw(img)
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="rgb24")
+        pil = Image.fromarray(img)
+        draw = ImageDraw.Draw(pil)
         if self.info["type"] == "classification":
-            arr = preprocess_image(img, self.info["input_size"])
+            arr = preprocess_image(pil, self.info["input_size"])
             preds = classify(self.model, arr)
             label, conf = interpret_class(preds)
-            if label: draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
+            if label:
+                draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
         else:
-            for name, conf, box in detect(self.model, img):
+            for name, conf, box in detect(self.model, pil):
                 draw.rectangle(box, outline="green", width=2)
-                draw.text((box[0], box[1]-10), f"{name} {conf:.2f}", fill="green")
-        return av.VideoFrame.from_ndarray(np.array(img), format="rgb24")
+                draw.text((box[0], max(box[1]-10,0)), f"{name} {conf:.2f}", fill="green")
+        return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
 
-# UI
+# UI: dropdown
 safe_names = {re.sub(r"[^\w.-]", "_", n): n for n in MODELS_INFO}
-model_display = st.selectbox("Select Model", list(safe_names))
-model_name = safe_names[model_display]
-model = load_model(model_name, MODELS_INFO[model_name])
+choice = st.selectbox("Select model", list(safe_names.keys())) if MODELS_INFO else None
+model_name = safe_names.get(choice) if choice else None
+model = load_model(model_name, MODELS_INFO[model_name]) if model_name else None
 
-# Image upload
+# Upload
 st.subheader("📷 Upload Image")
-img_file = st.file_uploader("Upload image", type=["jpg", "jpeg", "png"])
+img_file = st.file_uploader("Upload image", type=["jpg","jpeg","png"])
 if img_file and model:
     pil = Image.open(img_file).convert("RGB")
     st.image(pil, use_column_width=True)
     info = MODELS_INFO[model_name]
-    if info["type"] == "classification":
+    if info["type"]=="classification":
         arr = preprocess_image(pil, info["input_size"])
-        pred = classify(model, arr)
-        label, conf = interpret_class(pred)
+        preds = classify(model, arr)
+        label, conf = interpret_class(preds)
         if label:
             st.success(f"Prediction: {label} ({conf:.1%})")
     else:
-        img = pil.copy()
-        draw = ImageDraw.Draw(img)
-        counts = {"male": 0, "female": 0}
+        disp = pil.copy()
+        draw = ImageDraw.Draw(disp)
+        counts = {"male":0, "female":0}
         for name, conf, box in detect(model, pil):
             draw.rectangle(box, outline="green", width=2)
-            draw.text((box[0], box[1]-10), f"{name} {conf:.2f}", fill="green")
-            counts[name.lower()] += 1
-        st.image(img)
-        st.info(f"Detected: {counts['male']} males, {counts['female']} females")
+            draw.text((box[0], max(box[1]-10,0)), f"{name} {conf:.2f}", fill="green")
+            lname = name.lower()
+            if lname in counts:
+                counts[lname] += 1
+        st.image(disp, use_column_width=True)
+        st.info(f"Detected: {counts.get('male',0)} males, {counts.get('female',0)} females")
 
 # Live camera
 st.subheader("📸 Live Camera Detection")
 if model:
     webrtc_streamer(
-        key="live",
+        key="live-gender-detect",
         mode=WebRtcMode.SENDRECV,
         media_stream_constraints={"video": True, "audio": False},
         video_processor_factory=GenderProcessor,
         async_processing=True,
     )
+else:
+    st.warning("Please select a model first.")
 
 st.markdown("---")
-st.write("- Models from:", HF_REPO_ID)
+st.write(f"- Models from: {HF_REPO_ID}")
