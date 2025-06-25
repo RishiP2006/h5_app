@@ -80,26 +80,35 @@ def load_model_from_hf(name, info):
     fw = info.get("framework")
     try:
         if fw == "keras":
-            # Attempt standalone keras first
-            try:
-                import keras
-                model = keras.models.load_model(path, compile=False)
-                return model
-            except Exception:
-                pass
-            # Fallback to tensorflow.keras with custom_objects if needed
             try:
                 import tensorflow as tf
-                custom_objects = {}
-                lname = name.lower()
-                # Add preprocess_input based on model name
-                if "resnet50" in lname:
-                    from tensorflow.keras.applications.resnet50 import preprocess_input
-                    custom_objects["preprocess_input"] = preprocess_input
-                elif "inceptionv3" in lname or "inception_v3" in lname:
-                    from tensorflow.keras.applications.inception_v3 import preprocess_input
-                    custom_objects["preprocess_input"] = preprocess_input
-                # You can add more architectures here as needed
+            except ImportError:
+                st.error("TensorFlow not available for Keras models.")
+                return None
+            # Define CustomInputLayer to handle batch_shape kw
+            from tensorflow.keras.layers import InputLayer as TFInputLayer
+            @tf.keras.utils.register_keras_serializable()
+            class CustomInputLayer(TFInputLayer):
+                def __init__(self, *args, batch_shape=None, **kwargs):
+                    if batch_shape is not None:
+                        kwargs['batch_input_shape'] = tuple(batch_shape)
+                    super().__init__(*args, **kwargs)
+            # Register in global custom objects
+            tf.keras.utils.get_custom_objects()['InputLayer'] = CustomInputLayer
+            custom_objects = {'InputLayer': CustomInputLayer}
+            lname = name.lower()
+            # Add preprocess_input if needed
+            if "resnet50" in lname:
+                from tensorflow.keras.applications.resnet50 import preprocess_input
+                custom_objects["preprocess_input"] = preprocess_input
+            elif "inceptionv3" in lname or "inception_v3" in lname:
+                from tensorflow.keras.applications.inception_v3 import preprocess_input
+                custom_objects["preprocess_input"] = preprocess_input
+            elif "mobilenetv2" in lname:
+                from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+                custom_objects["preprocess_input"] = preprocess_input
+            # Additional architectures can be added similarly
+            try:
                 model = tf.keras.models.load_model(path, custom_objects=custom_objects, compile=False)
                 return model
             except Exception as e:
