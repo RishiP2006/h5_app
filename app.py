@@ -12,7 +12,7 @@ st.write("Select a model and upload an image or use live camera.")
 
 HF_REPO_ID = "RishiPTrial/models_h5"
 
-# Check if ultralytics is available
+# Attempt to import ultralytics; rely on headless OpenCV
 def check_ultralytics():
     try:
         import ultralytics
@@ -56,7 +56,6 @@ if not MODELS_INFO:
 
 @st.cache_resource(show_spinner=False)
 def load_model(name, info):
-    # Download
     try:
         path = hf_hub_download(repo_id=HF_REPO_ID, filename=name)
     except Exception as e:
@@ -71,7 +70,6 @@ def load_model(name, info):
             from keras.utils import custom_object_scope
             custom_objects = {}
             lname = name.lower()
-            # Add preprocess_input if known architecture
             if "resnet" in lname:
                 from keras.applications.resnet50 import preprocess_input
                 custom_objects["preprocess_input"] = preprocess_input
@@ -88,7 +86,7 @@ def load_model(name, info):
             st.error(f"Failed loading Keras model {name}: {e}")
             return None
 
-    # PyTorch custom ResNet18
+    # Custom PyTorch ResNet18
     if fw == "torch_custom":
         try:
             import torch
@@ -119,7 +117,7 @@ def load_model(name, info):
     # YOLO .pt
     if fw == "yolo":
         if not _ULTRA_AVAILABLE:
-            st.error("Ultralytics YOLO not installed; please add `ultralytics` to requirements.")
+            st.error("Ultralytics YOLO not available (import failed). Cannot load detection model.")
             return None
         try:
             from ultralytics import YOLO
@@ -159,7 +157,6 @@ def interpret_class(preds):
     if preds is None:
         return None, None
     arr = np.asarray(preds)
-    # binary logits or 2-class
     if arr.ndim == 2 and arr.shape[1] == 2:
         exps = np.exp(arr - np.max(arr, axis=1, keepdims=True))
         probs = exps / np.sum(exps, axis=1, keepdims=True)
@@ -180,7 +177,6 @@ def detect(model, img: Image.Image):
         for b in r.boxes:
             cls = int(b.cls[0])
             conf = float(b.conf[0])
-            # coords: xyxy
             try:
                 coords = tuple(map(int, b.xyxy[0].cpu().numpy()))
             except Exception:
@@ -236,8 +232,7 @@ if img_file and model:
             draw.rectangle(box, outline="green", width=2)
             draw.text((box[0], max(box[1]-10,0)), f"{name} {conf:.2f}", fill="green")
             lname = name.lower()
-            if lname in counts:
-                counts[lname] += 1
+            if lname in counts: counts[lname]+=1
         st.image(disp, use_column_width=True)
         st.info(f"Detected: {counts.get('male',0)} males, {counts.get('female',0)} females")
 
