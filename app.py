@@ -85,40 +85,50 @@ def load_model_from_hf(name, info):
             except ImportError:
                 st.error("TensorFlow not available for Keras models.")
                 return None
-            # Handle custom InputLayer batch_shape
-            from tensorflow.keras.layers import InputLayer as TFInputLayer
-            @tf.keras.utils.register_keras_serializable()
-            class CustomInputLayer(TFInputLayer):
-                def __init__(self, *args, batch_shape=None, **kwargs):
-                    if batch_shape is not None:
-                        kwargs['batch_input_shape'] = tuple(batch_shape)
-                    super().__init__(*args, **kwargs)
-            # Handle custom dtype policy
-            from tensorflow.keras.mixed_precision import Policy as KerasPolicy
-            @tf.keras.utils.register_keras_serializable()
-            class DTypePolicy(KerasPolicy):
-                def __init__(self, name):
-                    super().__init__(name)
-            # Register custom objects
-            custom_objects = {'InputLayer': CustomInputLayer, 'DTypePolicy': DTypePolicy}
             lname = name.lower()
-            # Add preprocess_input if needed
-            if "resnet50" in lname:
-                from tensorflow.keras.applications.resnet50 import preprocess_input
-                custom_objects["preprocess_input"] = preprocess_input
-            elif "inceptionv3" in lname or "inception_v3" in lname:
-                from tensorflow.keras.applications.inception_v3 import preprocess_input
-                custom_objects["preprocess_input"] = preprocess_input
+            # For known architectures, manually rebuild and load weights
+            if "inceptionv3" in lname:
+                # build InceptionV3 base
+                base = tf.keras.applications.InceptionV3(include_top=False, weights=None, input_shape=(299,299,3), pooling='avg')
+                x = base.output
+                output = tf.keras.layers.Dense(1, activation='sigmoid', name='predictions')(x)
+                model = tf.keras.Model(inputs=base.input, outputs=output)
+                try:
+                    model.load_weights(path, by_name=True, skip_mismatch=True)
+                    return model
+                except Exception as e:
+                    st.error(f"Failed loading weights for InceptionV3 model {name}: {e}")
+                    return None
             elif "mobilenetv2" in lname:
-                from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
-                custom_objects["preprocess_input"] = preprocess_input
-            # Load model
-            try:
-                model = tf.keras.models.load_model(path, custom_objects=custom_objects, compile=False)
-                return model
-            except Exception as e:
-                st.error(f"Failed loading Keras model {name}: {e}")
-                return None
+                base = tf.keras.applications.MobileNetV2(include_top=False, weights=None, input_shape=(224,224,3), pooling='avg')
+                x = base.output
+                output = tf.keras.layers.Dense(1, activation='sigmoid', name='predictions')(x)
+                model = tf.keras.Model(inputs=base.input, outputs=output)
+                try:
+                    model.load_weights(path, by_name=True, skip_mismatch=True)
+                    return model
+                except Exception as e:
+                    st.error(f"Failed loading weights for MobileNetV2 model {name}: {e}")
+                    return None
+            elif "resnet50" in lname:
+                base = tf.keras.applications.ResNet50(include_top=False, weights=None, input_shape=(224,224,3), pooling='avg')
+                x = base.output
+                output = tf.keras.layers.Dense(1, activation='sigmoid', name='predictions')(x)
+                model = tf.keras.Model(inputs=base.input, outputs=output)
+                try:
+                    model.load_weights(path, by_name=True, skip_mismatch=True)
+                    return model
+                except Exception as e:
+                    st.error(f"Failed loading weights for ResNet50 model {name}: {e}")
+                    return None
+            else:
+                # Fallback: try load_model with custom handling
+                try:
+                    model = tf.keras.models.load_model(path, compile=False)
+                    return model
+                except Exception as e:
+                    st.error(f"Fallback load_model failed for {name}: {e}")
+                    return None
 
         if fw == "torch_custom":
             try:
