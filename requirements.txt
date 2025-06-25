@@ -5,7 +5,7 @@ huggingface-hub
 torch==2.0.1
 torchvision==0.15.2
 tensorflow==2.15.0
-keras==2.15.0
+keras>=3.0.0
 ultralytics==8.3.156
 opencv-python-headless
 av

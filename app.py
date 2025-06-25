@@ -8,10 +8,22 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av
 
 st.set_page_config(page_title="Drosophila Gender Detection", layout="centered")
-st.title("🫀 Drosophila Gender Detection")
+st.title("🩰 Drosophila Gender Detection")
 st.write("Select a model and upload an image or use live camera.")
 
 HF_REPO_ID = "RishiPTrial/models_h5"
+
+def check_ultralytics():
+    try:
+        import ultralytics
+        version = ultralytics.__version__ if hasattr(ultralytics, "__version__") else "unknown"
+        st.info(f"Ultralytics installed, version: {version}")
+        return True
+    except Exception as e:
+        st.warning(f"Ultralytics import failed: {e}")
+        return False
+
+_ULTRA_AVAILABLE = check_ultralytics()
 
 @st.cache_data(show_spinner=False)
 def list_hf_models():
@@ -70,18 +82,9 @@ def load_model_from_hf(name, info):
         if fw == "keras":
             try:
                 import keras
-                from keras.layers import InputLayer
-                from keras import backend as K
-
-                class DTypePolicy:
-                    def __init__(self, name):
-                        self.name = name
-
-                keras.utils.get_custom_objects()["DTypePolicy"] = DTypePolicy
-
                 return keras.models.load_model(path, compile=False)
-            except Exception as fallback:
-                st.error(f"Fallback load_model failed for {name}: {fallback}")
+            except Exception as e:
+                st.error(f"Failed loading Keras model {name} with standalone keras: {e}")
                 return None
 
         if fw == "torch_custom":
@@ -95,15 +98,14 @@ def load_model_from_hf(name, info):
             return m
 
         if fw == "yolo":
-            try:
-                from ultralytics import YOLO
-                return YOLO(path)
-            except Exception as e:
-                st.error(f"Failed loading YOLO model {name}: {e}")
+            if not _ULTRA_AVAILABLE:
+                st.error("Ultralytics YOLO not installed; cannot load detection model.")
                 return None
+            from ultralytics import YOLO
+            return YOLO(path)
 
     except Exception as e:
-        st.error(f"Failed loading {name}: {e}")
+        st.error(f"Unexpected failure loading {name}: {e}")
         return None
 
     st.error(f"Unsupported framework for {name}")
@@ -117,8 +119,8 @@ def preprocess_image_pil(pil_img: Image.Image, size: int):
 def classify(model, img_array: np.ndarray):
     x = np.expand_dims(img_array, axis=0)
     try:
-        import tensorflow as tf
-        if isinstance(model, tf.keras.Model):
+        import keras
+        if isinstance(model, keras.Model):
             return model.predict(x)
     except Exception:
         pass
@@ -165,10 +167,7 @@ def detect_yolo(model, pil_img: Image.Image):
         for b in res.boxes:
             cls = int(b.cls[0])
             conf = float(b.conf[0])
-            try:
-                coords = tuple(map(int, b.xyxy[0].cpu().numpy()))
-            except Exception:
-                coords = tuple(map(int, b.xyxy[0]))
+            coords = tuple(map(int, b.xyxy[0].cpu().numpy())) if hasattr(b.xyxy[0], 'cpu') else tuple(map(int, b.xyxy[0]))
             name = model.names.get(cls, str(cls)) if hasattr(model, 'names') else str(cls)
             detections.append((name, conf, coords))
     return detections
@@ -203,7 +202,10 @@ def safe_label(name):
 safe_to_real = {safe_label(n): n for n in MODELS_INFO}
 choice = st.selectbox("Select model", list(safe_to_real.keys())) if MODELS_INFO else None
 model_name = safe_to_real.get(choice)
-model = load_model_from_hf(model_name, MODELS_INFO[model_name]) if model_name else None
+model = None
+if model_name:
+    info = MODELS_INFO[model_name]
+    model = load_model_from_hf(model_name, info)
 
 st.markdown("---")
 st.subheader("📷 Upload Image")
