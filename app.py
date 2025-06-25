@@ -8,7 +8,7 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av
 
 st.set_page_config(page_title="Drosophila Gender Detection", layout="centered")
-st.title("🩰 Drosophila Gender Detection")
+st.title("🪰 Drosophila Gender Detection")
 st.write("Select a model and upload an image or use live camera.")
 
 HF_REPO_ID = "RishiPTrial/models_h5"
@@ -80,19 +80,31 @@ def load_model_from_hf(name, info):
     fw = info.get("framework")
     try:
         if fw == "keras":
+            # Attempt standalone keras first
+            try:
+                import keras
+                model = keras.models.load_model(path, compile=False)
+                return model
+            except Exception:
+                pass
+            # Fallback to tensorflow.keras with custom_objects if needed
             try:
                 import tensorflow as tf
-                from tensorflow.keras.applications.resnet50 import preprocess_input
-                custom_objects = {"preprocess_input": preprocess_input}
-            except ImportError:
-                st.error("TensorFlow not available for Keras models.")
-                return None
-            try:
-                model = tf.keras.models.load_model(path, custom_objects=custom_objects)
+                custom_objects = {}
+                lname = name.lower()
+                # Add preprocess_input based on model name
+                if "resnet50" in lname:
+                    from tensorflow.keras.applications.resnet50 import preprocess_input
+                    custom_objects["preprocess_input"] = preprocess_input
+                elif "inceptionv3" in lname or "inception_v3" in lname:
+                    from tensorflow.keras.applications.inception_v3 import preprocess_input
+                    custom_objects["preprocess_input"] = preprocess_input
+                # You can add more architectures here as needed
+                model = tf.keras.models.load_model(path, custom_objects=custom_objects, compile=False)
+                return model
             except Exception as e:
                 st.error(f"Failed loading Keras model {name}: {e}")
                 return None
-            return model
 
         if fw == "torch_custom":
             try:
@@ -130,6 +142,7 @@ def load_model_from_hf(name, info):
     st.error(f"Unsupported framework for {name}")
     return None
 
+# ---------------- Inference helpers ----------------
 
 def preprocess_image_pil(pil_img: Image.Image, size: int):
     arr = pil_img.resize((size, size))
