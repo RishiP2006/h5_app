@@ -8,22 +8,10 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av
 
 st.set_page_config(page_title="Drosophila Gender Detection", layout="centered")
-st.title("🪰 Drosophila Gender Detection")
+st.title("🫀 Drosophila Gender Detection")
 st.write("Select a model and upload an image or use live camera.")
 
 HF_REPO_ID = "RishiPTrial/models_h5"
-
-def check_ultralytics():
-    try:
-        import ultralytics
-        version = ultralytics.__version__ if hasattr(ultralytics, "__version__") else "unknown"
-        st.info(f"Ultralytics installed, version: {version}")
-        return True
-    except Exception as e:
-        st.warning(f"Ultralytics import failed: {e}")
-        return False
-
-_ULTRA_AVAILABLE = check_ultralytics()
 
 @st.cache_data(show_spinner=False)
 def list_hf_models():
@@ -81,77 +69,32 @@ def load_model_from_hf(name, info):
     try:
         if fw == "keras":
             try:
-                import tensorflow as tf
-            except ImportError:
-                st.error("TensorFlow not available for Keras models.")
+                import keras
+                from keras.layers import InputLayer
+                from keras import backend as K
+
+                class DTypePolicy:
+                    def __init__(self, name):
+                        self.name = name
+
+                keras.utils.get_custom_objects()["DTypePolicy"] = DTypePolicy
+
+                return keras.models.load_model(path, compile=False)
+            except Exception as fallback:
+                st.error(f"Fallback load_model failed for {name}: {fallback}")
                 return None
-            lname = name.lower()
-            # For known architectures, manually rebuild and load weights
-            if "inceptionv3" in lname:
-                # build InceptionV3 base
-                base = tf.keras.applications.InceptionV3(include_top=False, weights=None, input_shape=(299,299,3), pooling='avg')
-                x = base.output
-                output = tf.keras.layers.Dense(1, activation='sigmoid', name='predictions')(x)
-                model = tf.keras.Model(inputs=base.input, outputs=output)
-                try:
-                    model.load_weights(path, by_name=True, skip_mismatch=True)
-                    return model
-                except Exception as e:
-                    st.error(f"Failed loading weights for InceptionV3 model {name}: {e}")
-                    return None
-            elif "mobilenetv2" in lname:
-                base = tf.keras.applications.MobileNetV2(include_top=False, weights=None, input_shape=(224,224,3), pooling='avg')
-                x = base.output
-                output = tf.keras.layers.Dense(1, activation='sigmoid', name='predictions')(x)
-                model = tf.keras.Model(inputs=base.input, outputs=output)
-                try:
-                    model.load_weights(path, by_name=True, skip_mismatch=True)
-                    return model
-                except Exception as e:
-                    st.error(f"Failed loading weights for MobileNetV2 model {name}: {e}")
-                    return None
-            elif "resnet50" in lname:
-                base = tf.keras.applications.ResNet50(include_top=False, weights=None, input_shape=(224,224,3), pooling='avg')
-                x = base.output
-                output = tf.keras.layers.Dense(1, activation='sigmoid', name='predictions')(x)
-                model = tf.keras.Model(inputs=base.input, outputs=output)
-                try:
-                    model.load_weights(path, by_name=True, skip_mismatch=True)
-                    return model
-                except Exception as e:
-                    st.error(f"Failed loading weights for ResNet50 model {name}: {e}")
-                    return None
-            else:
-                # Fallback: try load_model with custom handling
-                try:
-                    model = tf.keras.models.load_model(path, compile=False)
-                    return model
-                except Exception as e:
-                    st.error(f"Fallback load_model failed for {name}: {e}")
-                    return None
 
         if fw == "torch_custom":
-            try:
-                import torch
-                return load_model_final_pth(path)
-            except Exception as e:
-                st.error(f"Failed loading custom PyTorch model {name}: {e}")
-                return None
+            import torch
+            return load_model_final_pth(path)
 
         if fw == "torch":
-            try:
-                import torch
-                m = torch.load(path, map_location="cpu")
-                m.eval()
-                return m
-            except Exception as e:
-                st.error(f"Failed loading PyTorch model {name}: {e}")
-                return None
+            import torch
+            m = torch.load(path, map_location="cpu")
+            m.eval()
+            return m
 
         if fw == "yolo":
-            if not _ULTRA_AVAILABLE:
-                st.error("Ultralytics YOLO not installed; cannot load detection model.")
-                return None
             try:
                 from ultralytics import YOLO
                 return YOLO(path)
@@ -165,8 +108,6 @@ def load_model_from_hf(name, info):
 
     st.error(f"Unsupported framework for {name}")
     return None
-
-# ---------------- Inference helpers ----------------
 
 def preprocess_image_pil(pil_img: Image.Image, size: int):
     arr = pil_img.resize((size, size))
@@ -233,9 +174,9 @@ def detect_yolo(model, pil_img: Image.Image):
     return detections
 
 class GenderDetectionProcessor(VideoProcessorBase):
-    def __init__(self, model, info):
+    def __init__(self):
         self.model = model
-        self.info = info
+        self.info = MODELS_INFO[model_name]
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="rgb24")
@@ -262,10 +203,7 @@ def safe_label(name):
 safe_to_real = {safe_label(n): n for n in MODELS_INFO}
 choice = st.selectbox("Select model", list(safe_to_real.keys())) if MODELS_INFO else None
 model_name = safe_to_real.get(choice)
-model = None
-if model_name:
-    info = MODELS_INFO[model_name]
-    model = load_model_from_hf(model_name, info)
+model = load_model_from_hf(model_name, MODELS_INFO[model_name]) if model_name else None
 
 st.markdown("---")
 st.subheader("📷 Upload Image")
@@ -304,7 +242,7 @@ if model is not None:
         key="live-gender-detect",
         mode=WebRtcMode.SENDRECV,
         media_stream_constraints={"video": True, "audio": False},
-        video_processor_factory=lambda: GenderDetectionProcessor(model, MODELS_INFO[model_name]),
+        video_processor_factory=GenderDetectionProcessor,
         async_processing=True,
     )
 else:
