@@ -1,4 +1,3 @@
-import sys
 import streamlit as st
 import numpy as np
 from PIL import Image, ImageDraw
@@ -8,251 +7,194 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av
 
 st.set_page_config(page_title="Drosophila Gender Detection", layout="centered")
-st.title("🩰 Drosophila Gender Detection")
+st.title("🪰 Drosophila Gender Detection")
 st.write("Select a model and upload an image or use live camera.")
 
 HF_REPO_ID = "RishiPTrial/models_h5"
 
-def check_ultralytics():
-    try:
-        import ultralytics
-        version = ultralytics.__version__ if hasattr(ultralytics, "__version__") else "unknown"
-        st.info(f"Ultralytics installed, version: {version}")
-        return True
-    except Exception as e:
-        st.warning(f"Ultralytics import failed: {e}")
-        return False
-
-_ULTRA_AVAILABLE = check_ultralytics()
-
-@st.cache_data(show_spinner=False)
-def list_hf_models():
+@st.cache_data
+def list_models():
     api = HfApi()
-    try:
-        files = api.list_repo_files(repo_id=HF_REPO_ID)
-        return [f for f in files if f.lower().endswith((".pt", ".h5", ".pth")) and not f.startswith(".")]
-    except Exception:
-        return []
+    return [
+        f for f in api.list_repo_files(HF_REPO_ID)
+        if f.lower().endswith((".h5", ".pt", ".pth"))
+    ]
 
-@st.cache_data(show_spinner=False)
-def build_models_info():
-    files = list_hf_models()
+@st.cache_data
+def build_model_info():
     info = {}
-    for fname in files:
-        input_size = 224
-        if "inceptionv3" in fname.lower():
-            input_size = 299
-        lower = fname.lower()
-        if lower.endswith(".pt"):
-            info[fname] = {"type": "detection", "framework": "yolo"}
-        elif lower.endswith(".h5"):
-            info[fname] = {"type": "classification", "framework": "keras", "input_size": input_size}
-        elif fname == "model_final.pth":
-            info[fname] = {"type": "classification", "framework": "torch_custom", "input_size": input_size}
-        elif lower.endswith(".pth"):
-            info[fname] = {"type": "classification", "framework": "torch", "input_size": input_size}
+    for f in list_models():
+        name = f.lower()
+        if name.endswith(".pt"):
+            info[f] = {"type": "detection", "framework": "yolo"}
+        elif f == "model_final.pth":
+            info[f] = {"type": "classification", "framework": "torch_custom", "input_size": 224}
+        elif name.endswith(".pth"):
+            info[f] = {"type": "classification", "framework": "torch", "input_size": 224}
+        elif name.endswith(".h5"):
+            size = 299 if "inceptionv3" in name else 224
+            info[f] = {"type": "classification", "framework": "keras", "input_size": size}
     return info
 
-MODELS_INFO = build_models_info()
-if not MODELS_INFO:
-    st.error(f"No model files found in HF repo {HF_REPO_ID}")
+MODELS_INFO = build_model_info()
 
-def load_model_final_pth(path):
-    import torch
-    import torch.nn as nn
-    from torchvision import models as _torch_models
-    model = _torch_models.resnet18(pretrained=False)
-    model.fc = nn.Linear(model.fc.in_features, 1)
-    checkpoint = torch.load(path, map_location="cpu")
-    state_dict = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-    model.load_state_dict(state_dict, strict=False)
-    model.eval()
-    return model
+@st.cache_resource
+def load_model(name, info):
+    path = hf_hub_download(HF_REPO_ID, filename=name)
+    fw = info["framework"]
 
-@st.cache_resource(show_spinner=False)
-def load_model_from_hf(name, info):
-    try:
-        path = hf_hub_download(repo_id=HF_REPO_ID, filename=name)
-    except Exception as e:
-        st.error(f"Error downloading {name}: {e}")
-        return None
+    if fw == "keras":
+        try:
+            import keras
+            from keras.utils import custom_object_scope
 
-    fw = info.get("framework")
-    try:
-        if fw == "keras":
-            try:
-                import keras
-                return keras.models.load_model(path, compile=False)
-            except Exception as e:
-                st.error(f"Failed loading Keras model {name} with standalone keras: {e}")
-                return None
+            custom_objects = {}
+            lname = name.lower()
+            if "resnet" in lname:
+                from keras.applications.resnet50 import preprocess_input
+                custom_objects["preprocess_input"] = preprocess_input
+            elif "inceptionv3" in lname:
+                from keras.applications.inception_v3 import preprocess_input
+                custom_objects["preprocess_input"] = preprocess_input
+            elif "mobilenetv2" in lname:
+                from keras.applications.mobilenet_v2 import preprocess_input
+                custom_objects["preprocess_input"] = preprocess_input
 
-        if fw == "torch_custom":
-            import torch
-            return load_model_final_pth(path)
+            with custom_object_scope(custom_objects):
+                model = keras.models.load_model(path, compile=False)
+            return model
+        except Exception as e:
+            st.error(f"Failed loading Keras model {name}: {e}")
+            return None
 
-        if fw == "torch":
-            import torch
-            m = torch.load(path, map_location="cpu")
-            m.eval()
-            return m
+    if fw == "torch_custom":
+        import torch
+        import torch.nn as nn
+        from torchvision import models
+        model = models.resnet18(pretrained=False)
+        model.fc = nn.Linear(model.fc.in_features, 1)
+        state_dict = torch.load(path, map_location="cpu")
+        model.load_state_dict(state_dict.get("model", state_dict), strict=False)
+        model.eval()
+        return model
 
-        if fw == "yolo":
-            if not _ULTRA_AVAILABLE:
-                st.error("Ultralytics YOLO not installed; cannot load detection model.")
-                return None
-            from ultralytics import YOLO
-            return YOLO(path)
+    if fw == "torch":
+        import torch
+        model = torch.load(path, map_location="cpu")
+        model.eval()
+        return model
 
-    except Exception as e:
-        st.error(f"Unexpected failure loading {name}: {e}")
-        return None
+    if fw == "yolo":
+        from ultralytics import YOLO
+        return YOLO(path)
 
-    st.error(f"Unsupported framework for {name}")
     return None
 
-def preprocess_image_pil(pil_img: Image.Image, size: int):
-    arr = pil_img.resize((size, size))
-    arr = np.asarray(arr).astype(np.float32) / 255.0
-    return arr
+def preprocess_image(img, size):
+    return np.asarray(img.resize((size, size))).astype(np.float32) / 255.0
 
-def classify(model, img_array: np.ndarray):
-    x = np.expand_dims(img_array, axis=0)
+def classify(model, img):
+    arr = np.expand_dims(img, axis=0)
     try:
         import keras
         if isinstance(model, keras.Model):
-            return model.predict(x)
+            return model.predict(arr)
     except Exception:
         pass
     try:
         import torch
         if isinstance(model, torch.nn.Module):
+            x = torch.tensor(arr).permute(0,3,1,2).float()
             with torch.no_grad():
-                x_t = torch.tensor(x).permute(0,3,1,2).float()
-                out = model(x_t)
-                return out.cpu().numpy()
+                return model(x).cpu().numpy()
     except Exception:
         pass
-    st.error("Unknown model type for prediction.")
     return None
 
-def interpret_classification(preds):
-    if preds is None:
-        return None, None
-    arr = np.asarray(preds)
+def interpret_class(preds):
+    if preds is None: return None, None
+    arr = np.array(preds)
     if arr.ndim == 2 and arr.shape[1] == 2:
-        exps = np.exp(arr - np.max(arr, axis=1, keepdims=True))
-        probs = exps / np.sum(exps, axis=1, keepdims=True)
-        idx = int(np.argmax(probs, axis=1)[0])
-        label = ["Male", "Female"][idx]
-        return label, float(probs[0][idx])
+        exps = np.exp(arr - np.max(arr))
+        probs = exps / np.sum(exps)
+        idx = np.argmax(probs)
+        return ["Male", "Female"][idx], float(probs[idx])
     if arr.ndim == 2 and arr.shape[1] == 1:
         val = float(arr[0][0])
-        prob = 1/(1+np.exp(-val)) if (val < 0 or val > 1) else val
+        prob = 1/(1 + np.exp(-val))
         label = "Female" if prob >= 0.5 else "Male"
-        conf = prob if label == "Female" else 1-prob
-        return label, conf
-    st.warning(f"Unexpected prediction shape: {arr.shape}")
+        return label, prob if label == "Female" else 1 - prob
     return None, None
 
-def detect_yolo(model, pil_img: Image.Image):
-    try:
-        arr = np.array(pil_img.convert("RGB"))
-        results = model.predict(source=arr)
-    except Exception as e:
-        st.error(f"YOLO inference failed: {e}")
-        return []
-    detections = []
-    for res in results:
-        for b in res.boxes:
-            cls = int(b.cls[0])
-            conf = float(b.conf[0])
-            coords = tuple(map(int, b.xyxy[0].cpu().numpy())) if hasattr(b.xyxy[0], 'cpu') else tuple(map(int, b.xyxy[0]))
-            name = model.names.get(cls, str(cls)) if hasattr(model, 'names') else str(cls)
-            detections.append((name, conf, coords))
-    return detections
+def detect(model, img):
+    arr = np.array(img.convert("RGB"))
+    results = model.predict(source=arr)
+    dets = []
+    for r in results:
+        for b in r.boxes:
+            name = model.names[int(b.cls[0])]
+            coords = list(map(int, b.xyxy[0].cpu().numpy()))
+            dets.append((name, float(b.conf[0]), coords))
+    return dets
 
-class GenderDetectionProcessor(VideoProcessorBase):
+class GenderProcessor(VideoProcessorBase):
     def __init__(self):
         self.model = model
         self.info = MODELS_INFO[model_name]
+    def recv(self, frame):
+        img = Image.fromarray(frame.to_ndarray(format="rgb24"))
+        draw = ImageDraw.Draw(img)
+        if self.info["type"] == "classification":
+            arr = preprocess_image(img, self.info["input_size"])
+            preds = classify(self.model, arr)
+            label, conf = interpret_class(preds)
+            if label: draw.text((10, 10), f"{label} ({conf:.0%})", fill="red")
+        else:
+            for name, conf, box in detect(self.model, img):
+                draw.rectangle(box, outline="green", width=2)
+                draw.text((box[0], box[1]-10), f"{name} {conf:.2f}", fill="green")
+        return av.VideoFrame.from_ndarray(np.array(img), format="rgb24")
 
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        img = frame.to_ndarray(format="rgb24")
-        pil = Image.fromarray(img)
-        draw = ImageDraw.Draw(pil)
-        if self.model is not None:
-            if self.info.get("type") == "classification":
-                size = self.info.get("input_size", 224)
-                arr = preprocess_image_pil(pil, size)
-                preds = classify(self.model, arr)
-                label, prob = interpret_classification(preds)
-                if label:
-                    draw.text((10, 10), f"{label} ({prob:.1%})", fill="red")
-            else:
-                dets = detect_yolo(self.model, pil)
-                for name, conf, (x1, y1, x2, y2) in dets:
-                    draw.rectangle([x1, y1, x2, y2], outline="green", width=2)
-                    draw.text((x1, max(y1-10, 0)), f"{name} {conf:.2f}", fill="green")
-        return av.VideoFrame.from_ndarray(np.array(pil), format="rgb24")
+# UI
+safe_names = {re.sub(r"[^\w.-]", "_", n): n for n in MODELS_INFO}
+model_display = st.selectbox("Select Model", list(safe_names))
+model_name = safe_names[model_display]
+model = load_model(model_name, MODELS_INFO[model_name])
 
-def safe_label(name):
-    return re.sub(r"[^\w\s.-]", "_", name)
-
-safe_to_real = {safe_label(n): n for n in MODELS_INFO}
-choice = st.selectbox("Select model", list(safe_to_real.keys())) if MODELS_INFO else None
-model_name = safe_to_real.get(choice)
-model = None
-if model_name:
-    info = MODELS_INFO[model_name]
-    model = load_model_from_hf(model_name, info)
-
-st.markdown("---")
+# Image upload
 st.subheader("📷 Upload Image")
 img_file = st.file_uploader("Upload image", type=["jpg", "jpeg", "png"])
-if img_file and model is not None:
-    pil_img = Image.open(img_file).convert("RGB")
-    st.image(pil_img, use_column_width=True)
+if img_file and model:
+    pil = Image.open(img_file).convert("RGB")
+    st.image(pil, use_column_width=True)
     info = MODELS_INFO[model_name]
-    if info.get("type") == "classification":
-        arr = preprocess_image_pil(pil_img, info.get("input_size", 224))
-        preds = classify(model, arr)
-        label, prob = interpret_classification(preds)
+    if info["type"] == "classification":
+        arr = preprocess_image(pil, info["input_size"])
+        pred = classify(model, arr)
+        label, conf = interpret_class(pred)
         if label:
-            st.success(f"Prediction: {label} ({prob:.1%})")
+            st.success(f"Prediction: {label} ({conf:.1%})")
     else:
-        disp = pil_img.copy()
-        draw = ImageDraw.Draw(disp)
-        dets = detect_yolo(model, pil_img)
-        male_count = female_count = 0
-        for name, conf, box in dets:
-            x1, y1, x2, y2 = box
-            draw.rectangle([x1, y1, x2, y2], outline="green", width=2)
-            draw.text((x1, max(y1-10, 0)), f"{name} {conf:.2f}", fill="green")
-            if name.lower() == "male":
-                male_count += 1
-            elif name.lower() == "female":
-                female_count += 1
-        st.image(disp, use_column_width=True)
-        if dets:
-            st.info(f"Detected Males: {male_count}, Females: {female_count}")
+        img = pil.copy()
+        draw = ImageDraw.Draw(img)
+        counts = {"male": 0, "female": 0}
+        for name, conf, box in detect(model, pil):
+            draw.rectangle(box, outline="green", width=2)
+            draw.text((box[0], box[1]-10), f"{name} {conf:.2f}", fill="green")
+            counts[name.lower()] += 1
+        st.image(img)
+        st.info(f"Detected: {counts['male']} males, {counts['female']} females")
 
-st.markdown("---")
-st.subheader("📸 Live Camera Gender Detection")
-if model is not None:
-    ctx = webrtc_streamer(
-        key="live-gender-detect",
+# Live camera
+st.subheader("📸 Live Camera Detection")
+if model:
+    webrtc_streamer(
+        key="live",
         mode=WebRtcMode.SENDRECV,
         media_stream_constraints={"video": True, "audio": False},
-        video_processor_factory=GenderDetectionProcessor,
+        video_processor_factory=GenderProcessor,
         async_processing=True,
     )
-else:
-    st.warning("Please select a model first.")
 
 st.markdown("---")
-st.write("**Notes:**")
-st.write(f"- Models from HF: {HF_REPO_ID}")
-st.write("- Classification assumes binary output.")
-st.write("- YOLO models output bounding boxes with class names.")
-st.write("- Live camera uses PIL for drawing, no cv2 needed.")
+st.write("- Models from:", HF_REPO_ID)
