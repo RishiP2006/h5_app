@@ -7,7 +7,7 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av
 
 st.set_page_config(page_title="Drosophila Gender Detection", layout="centered")
-st.title("🪰 Drosophila Gender Detection")
+st.title("Drosophila Gender Detection")
 st.write("Select a model and upload an image or use live camera.")
 
 HF_REPO_ID = "RishiPTrial/models_h5"
